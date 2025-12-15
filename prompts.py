@@ -450,7 +450,7 @@ For each figure, write a complete legend that:
 3. Notes sample sizes if relevant
 4. Describes statistical annotations
 
-Format: "Figure N. [Title]. [Description]...\""""",
+Format: "Figure N. [Title]. [Description]..." """,
 
     'limitations_writing': """Write a Limitations paragraph for this analysis.
 

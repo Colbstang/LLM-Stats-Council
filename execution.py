@@ -18,34 +18,42 @@ class CodeExecutor:
     
     def execute(self, code: str, df: pd.DataFrame) -> Tuple[str, List[bytes], Dict[str, pd.DataFrame], float]:
         """
-        Execute analysis code in OpenAI sandbox.
-        
+        Execute analysis code in OpenAI sandbox using Assistants API.
+
         Args:
             code: Python code to execute
             df: DataFrame to analyze
-            
+
         Returns:
             Tuple of (results_text, figures_list, tables_dict, cost)
         """
         figures = []
         tables = {}
-        
+
         # Save dataframe to temp file for upload
         with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
             df.to_csv(f, index=False)
             temp_csv_path = f.name
-        
+
         try:
             # Upload the data file
             with open(temp_csv_path, 'rb') as f:
                 file = self.client.files.create(file=f, purpose='assistants')
-            
+
+            # Create assistant with code interpreter
+            assistant = self.client.beta.assistants.create(
+                name="Statistical Analyst",
+                instructions="You are a statistical analyst. Execute Python code to analyze data and generate results.",
+                model="gpt-4o",
+                tools=[{"type": "code_interpreter"}]
+            )
+
             # Create the analysis prompt
             analysis_prompt = f"""
-You are a statistical analyst. Execute the following Python code to analyze the uploaded CSV data.
+Execute the following Python code to analyze the uploaded CSV data.
 
 IMPORTANT INSTRUCTIONS:
-1. Load the data from the uploaded CSV file
+1. Load the data from the uploaded file using pandas
 2. Execute the analysis code provided below
 3. Generate all figures as PNG files
 4. Generate all tables as CSV files
@@ -69,64 +77,85 @@ After running the analysis:
 
 Execute the code now and provide results.
 """
-            
-            # Call the Responses API with code interpreter
-            response = self.client.responses.create(
-                model="gpt-4o",
-                input=[
+
+            # Create thread
+            thread = self.client.beta.threads.create()
+
+            # Add message with file attachment
+            message = self.client.beta.threads.messages.create(
+                thread_id=thread.id,
+                role="user",
+                content=analysis_prompt,
+                attachments=[
                     {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_file",
-                                "file_id": file.id
-                            },
-                            {
-                                "type": "input_text",
-                                "text": analysis_prompt
-                            }
-                        ]
+                        "file_id": file.id,
+                        "tools": [{"type": "code_interpreter"}]
                     }
-                ],
-                tools=[{"type": "code_interpreter"}],
-                temperature=0.0
+                ]
             )
-            
+
+            # Run the assistant
+            run = self.client.beta.threads.runs.create_and_poll(
+                thread_id=thread.id,
+                assistant_id=assistant.id,
+                timeout=300  # 5 minutes timeout
+            )
+
             # Extract results
             results_text = ""
-            
-            for item in response.output:
-                if item.type == "message":
-                    for content in item.content:
-                        if hasattr(content, 'text'):
-                            results_text += content.text + "\n"
-                        elif hasattr(content, 'file'):
-                            # Download generated files
-                            file_content = self.client.files.content(content.file.file_id)
-                            file_bytes = file_content.read()
-                            
-                            if content.file.filename.endswith('.png'):
-                                figures.append(file_bytes)
-                            elif content.file.filename.endswith('.csv'):
-                                # Parse CSV into DataFrame
-                                import io
-                                table_df = pd.read_csv(io.BytesIO(file_bytes))
-                                table_name = content.file.filename.replace('.csv', '').replace('_', ' ').title()
-                                tables[table_name] = table_df
-            
+
+            if run.status == 'completed':
+                # Get messages
+                messages = self.client.beta.threads.messages.list(
+                    thread_id=thread.id,
+                    order="asc"
+                )
+
+                for msg in messages:
+                    if msg.role == "assistant":
+                        for content in msg.content:
+                            if content.type == "text":
+                                results_text += content.text.value + "\n"
+                            elif content.type == "image_file":
+                                # Download image file
+                                file_content = self.client.files.content(content.image_file.file_id)
+                                figures.append(file_content.read())
+
+                # Check for generated files in run steps
+                run_steps = self.client.beta.threads.runs.steps.list(
+                    thread_id=thread.id,
+                    run_id=run.id
+                )
+
+                for step in run_steps:
+                    if step.type == "tool_calls":
+                        for tool_call in step.step_details.tool_calls:
+                            if tool_call.type == "code_interpreter":
+                                # Get output files from code interpreter
+                                for output in tool_call.code_interpreter.outputs:
+                                    if output.type == "image":
+                                        file_content = self.client.files.content(output.image.file_id)
+                                        figures.append(file_content.read())
+                                    # Note: CSV files need to be explicitly saved and referenced
+            else:
+                results_text = f"Run failed with status: {run.status}"
+
             # Calculate cost (approximate)
             # GPT-4o with code interpreter: ~$0.01-0.05 per execution typically
             cost = 0.03  # Rough estimate
-            
-            # Clean up uploaded file
+
+            # Clean up
             self.client.files.delete(file.id)
-            
+            self.client.beta.assistants.delete(assistant.id)
+
             return results_text, figures, tables, cost
-            
+
         except Exception as e:
-            error_msg = f"Execution error: {str(e)}"
+            error_msg = f"Execution error: {str(e)}\n{type(e).__name__}"
+            import traceback
+            error_msg += f"\n{traceback.format_exc()}"
             return error_msg, [], {}, 0.0
-        
+
         finally:
             # Clean up temp file
             if os.path.exists(temp_csv_path):
@@ -140,37 +169,51 @@ Execute the code now and provide results.
         with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
             df.to_csv(f, index=False)
             temp_csv_path = f.name
-        
+
         try:
             with open(temp_csv_path, 'rb') as f:
                 file = self.client.files.create(file=f, purpose='assistants')
-            
-            response = self.client.responses.create(
+
+            # Create assistant
+            assistant = self.client.beta.assistants.create(
+                name="Quick Analyst",
+                instructions="Execute Python code and return results.",
                 model="gpt-4o-mini",
-                input=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "input_file", "file_id": file.id},
-                            {"type": "input_text", "text": f"Execute this code and return results:\n```python\n{code}\n```"}
-                        ]
-                    }
-                ],
-                tools=[{"type": "code_interpreter"}],
-                temperature=0.0
+                tools=[{"type": "code_interpreter"}]
             )
-            
+
+            # Create thread and run
+            thread = self.client.beta.threads.create()
+            message = self.client.beta.threads.messages.create(
+                thread_id=thread.id,
+                role="user",
+                content=f"Execute this code and return results:\n```python\n{code}\n```",
+                attachments=[{"file_id": file.id, "tools": [{"type": "code_interpreter"}]}]
+            )
+
+            run = self.client.beta.threads.runs.create_and_poll(
+                thread_id=thread.id,
+                assistant_id=assistant.id,
+                timeout=120
+            )
+
             results_text = ""
-            for item in response.output:
-                if item.type == "message":
-                    for content in item.content:
-                        if hasattr(content, 'text'):
-                            results_text += content.text + "\n"
-            
+            if run.status == 'completed':
+                messages = self.client.beta.threads.messages.list(
+                    thread_id=thread.id,
+                    order="asc"
+                )
+                for msg in messages:
+                    if msg.role == "assistant":
+                        for content in msg.content:
+                            if content.type == "text":
+                                results_text += content.text.value + "\n"
+
             self.client.files.delete(file.id)
-            
+            self.client.beta.assistants.delete(assistant.id)
+
             return results_text, 0.01
-            
+
         except Exception as e:
             return f"Error: {str(e)}", 0.0
         finally:

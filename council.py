@@ -42,7 +42,7 @@ class StatsCouncil:
                 'output_cost': 8.00
             },
             'opus': {
-                'id': 'anthropic/claude-opus-4',
+                'id': 'anthropic/claude-opus-4-5',
                 'name': 'Claude Opus 4.5',
                 'input_cost': 5.00,
                 'output_cost': 25.00

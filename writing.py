@@ -17,7 +17,7 @@ class ResultsWriter:
     def __init__(self, openrouter_api_key: str):
         self.api_key = openrouter_api_key
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
-        self.model_id = "anthropic/claude-opus-4"
+        self.model_id = "anthropic/claude-opus-4-5"
         self.input_cost = 5.00  # per 1M tokens
         self.output_cost = 25.00  # per 1M tokens
     
@@ -163,42 +163,57 @@ class ResultsWriter:
     def _create_word_document(self, methods: str, results: str, legends: str,
                              limitations: str, tables: Dict[str, pd.DataFrame],
                              journal_format: dict) -> str:
-        """Create Word document using docx library via Node.js."""
-        import subprocess
-        import json
-        
-        # Prepare content for the document
-        doc_content = {
-            'methods': methods,
-            'results': results,
-            'legends': legends,
-            'limitations': limitations,
-            'tables': {name: table.to_dict('records') for name, table in tables.items()},
-            'journal_format': journal_format
-        }
-        
-        # Save content to temp JSON
-        content_path = tempfile.mktemp(suffix='.json')
-        with open(content_path, 'w') as f:
-            json.dump(doc_content, f)
-        
+        """Create Word document using python-docx library."""
+        from docx import Document
+        from docx.shared import Pt, Inches
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+
         # Output path
         output_path = tempfile.mktemp(suffix='.docx')
-        
-        # Create the document using Node.js script
-        js_script = self._generate_docx_script(content_path, output_path)
-        
-        script_path = tempfile.mktemp(suffix='.js')
-        with open(script_path, 'w') as f:
-            f.write(js_script)
-        
+
         try:
-            result = subprocess.run(['node', script_path], capture_output=True, text=True, timeout=60)
-            if result.returncode != 0:
-                raise Exception(f"Document generation failed: {result.stderr}")
-            
+            # Create document
+            doc = Document()
+
+            # Set default font
+            style = doc.styles['Normal']
+            font = style.font
+            font.name = 'Arial'
+            font.size = Pt(12)
+
+            # Title
+            title = doc.add_heading('Statistical Analysis Results', level=0)
+            title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+            # Methods section
+            doc.add_heading('Methods', level=1)
+            self._add_formatted_text(doc, methods)
+
+            # Results section
+            doc.add_heading('Results', level=1)
+            self._add_formatted_text(doc, results)
+
+            # Add tables if any
+            if tables:
+                doc.add_page_break()
+                doc.add_heading('Tables', level=1)
+                for table_name, table_df in tables.items():
+                    doc.add_heading(table_name, level=2)
+                    self._add_dataframe_table(doc, table_df)
+                    doc.add_paragraph()
+
+            # Figure legends
+            doc.add_heading('Figure Legends', level=1)
+            self._add_formatted_text(doc, legends)
+
+            # Limitations
+            doc.add_heading('Limitations', level=1)
+            self._add_formatted_text(doc, limitations)
+
+            # Save document
+            doc.save(output_path)
             return output_path
-            
+
         except Exception as e:
             # Fallback: create simple text file
             fallback_path = tempfile.mktemp(suffix='.txt')
@@ -211,154 +226,48 @@ class ResultsWriter:
                 f.write(legends)
                 f.write("\n\nLIMITATIONS\n\n")
                 f.write(limitations)
-            
+
             return fallback_path
-        
-        finally:
-            # Cleanup temp files
-            for path in [content_path, script_path]:
-                if os.path.exists(path):
-                    os.remove(path)
-    
-    def _generate_docx_script(self, content_path: str, output_path: str) -> str:
-        """Generate Node.js script for creating Word document."""
-        return f'''
-const {{ Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, 
-         Table, TableRow, TableCell, BorderStyle, WidthType }} = require('docx');
-const fs = require('fs');
 
-const content = JSON.parse(fs.readFileSync('{content_path}', 'utf8'));
+    def _add_formatted_text(self, doc, text: str):
+        """Add formatted text to document, handling markdown-style formatting."""
+        lines = text.split('\n')
 
-// Helper to convert markdown-like text to paragraphs
-function textToParagraphs(text) {{
-    const paragraphs = [];
-    const lines = text.split('\\n');
-    
-    for (const line of lines) {{
-        if (line.trim() === '') {{
-            continue;
-        }}
-        
-        // Check for headers
-        if (line.startsWith('### ')) {{
-            paragraphs.push(new Paragraph({{
-                heading: HeadingLevel.HEADING_3,
-                children: [new TextRun({{ text: line.substring(4), bold: true }})]
-            }}));
-        }} else if (line.startsWith('## ')) {{
-            paragraphs.push(new Paragraph({{
-                heading: HeadingLevel.HEADING_2,
-                children: [new TextRun({{ text: line.substring(3), bold: true }})]
-            }}));
-        }} else if (line.startsWith('# ')) {{
-            paragraphs.push(new Paragraph({{
-                heading: HeadingLevel.HEADING_1,
-                children: [new TextRun({{ text: line.substring(2), bold: true }})]
-            }}));
-        }} else {{
-            // Regular paragraph - handle bold text marked with **
-            const runs = [];
-            const parts = line.split(/\\*\\*([^*]+)\\*\\*/g);
-            for (let i = 0; i < parts.length; i++) {{
-                if (parts[i]) {{
-                    runs.push(new TextRun({{
-                        text: parts[i],
-                        bold: i % 2 === 1
-                    }}));
-                }}
-            }}
-            paragraphs.push(new Paragraph({{ children: runs }}));
-        }}
-    }}
-    
-    return paragraphs;
-}}
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
 
-// Create document
-const doc = new Document({{
-    styles: {{
-        default: {{
-            document: {{
-                run: {{
-                    font: "Arial",
-                    size: 24  // 12pt
-                }}
-            }}
-        }},
-        paragraphStyles: [
-            {{
-                id: "Heading1",
-                name: "Heading 1",
-                basedOn: "Normal",
-                run: {{ size: 32, bold: true, font: "Arial" }},
-                paragraph: {{ spacing: {{ before: 240, after: 120 }} }}
-            }},
-            {{
-                id: "Heading2",
-                name: "Heading 2", 
-                basedOn: "Normal",
-                run: {{ size: 28, bold: true, font: "Arial" }},
-                paragraph: {{ spacing: {{ before: 200, after: 100 }} }}
-            }}
-        ]
-    }},
-    sections: [{{
-        properties: {{
-            page: {{
-                margin: {{ top: 1440, right: 1440, bottom: 1440, left: 1440 }}
-            }}
-        }},
-        children: [
-            // Title
-            new Paragraph({{
-                alignment: AlignmentType.CENTER,
-                children: [new TextRun({{ text: "Statistical Analysis Results", bold: true, size: 36 }})]
-            }}),
-            new Paragraph({{ children: [] }}),
-            
-            // Methods section
-            new Paragraph({{
-                heading: HeadingLevel.HEADING_1,
-                children: [new TextRun({{ text: "Methods", bold: true }})]
-            }}),
-            ...textToParagraphs(content.methods),
-            
-            new Paragraph({{ children: [] }}),
-            
-            // Results section
-            new Paragraph({{
-                heading: HeadingLevel.HEADING_1,
-                children: [new TextRun({{ text: "Results", bold: true }})]
-            }}),
-            ...textToParagraphs(content.results),
-            
-            new Paragraph({{ children: [] }}),
-            
-            // Figure legends
-            new Paragraph({{
-                heading: HeadingLevel.HEADING_1,
-                children: [new TextRun({{ text: "Figure Legends", bold: true }})]
-            }}),
-            ...textToParagraphs(content.legends),
-            
-            new Paragraph({{ children: [] }}),
-            
-            // Limitations
-            new Paragraph({{
-                heading: HeadingLevel.HEADING_1,
-                children: [new TextRun({{ text: "Limitations", bold: true }})]
-            }}),
-            ...textToParagraphs(content.limitations)
-        ]
-    }}]
-}});
+            # Check for headers
+            if line.startswith('### '):
+                doc.add_heading(line[4:], level=3)
+            elif line.startswith('## '):
+                doc.add_heading(line[3:], level=2)
+            elif line.startswith('# '):
+                doc.add_heading(line[2:], level=1)
+            else:
+                # Regular paragraph - handle bold text marked with **
+                p = doc.add_paragraph()
+                parts = line.split('**')
+                for i, part in enumerate(parts):
+                    if part:
+                        run = p.add_run(part)
+                        if i % 2 == 1:  # Odd indices are between ** markers
+                            run.bold = True
 
-// Save document
-Packer.toBuffer(doc).then(buffer => {{
-    fs.writeFileSync('{output_path}', buffer);
-    console.log('Document created successfully');
-}}).catch(err => {{
-    console.error('Error creating document:', err);
-    process.exit(1);
-}});
-'''
+    def _add_dataframe_table(self, doc, df: pd.DataFrame):
+        """Add a pandas DataFrame as a table to the document."""
+        # Create table with header row
+        table = doc.add_table(rows=1, cols=len(df.columns))
+        table.style = 'Light Grid Accent 1'
+
+        # Add header row
+        header_cells = table.rows[0].cells
+        for i, col_name in enumerate(df.columns):
+            header_cells[i].text = str(col_name)
+
+        # Add data rows
+        for _, row in df.iterrows():
+            row_cells = table.add_row().cells
+            for i, value in enumerate(row):
+                row_cells[i].text = str(value)
